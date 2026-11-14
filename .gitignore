@@ -1,0 +1,20 @@
+# Godot
+.godot/
+*.translation
+export_credentials.cfg
+# Android build outputs and local tooling
+android/build/build/
+android/build/.gradle/
+android/build/.cxx/
+android/build/local.properties
+.gradle/
+*.apk
+*.aab
+*.idsig
+# secrets - never commit
+keys/
+*.keystore
+*.jks
+release_credentials.txt
+.env
+android/build/libs/

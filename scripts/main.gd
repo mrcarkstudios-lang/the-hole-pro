@@ -10,7 +10,7 @@ const CELL := 2.0             # spatial-grid cell size
 const SEA_SHADER := "shader_type spatial;\nrender_mode unshaded;\nuniform vec3 deep = vec3(0.08, 0.42, 0.72);\nuniform vec3 shallow = vec3(0.3, 0.8, 0.9);\nuniform float edge = 23.0;\nvarying vec3 wp;\nvoid vertex() { wp = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz; }\nvoid fragment() {\n\tfloat w = sin(wp.x * 1.3 + TIME * 0.9) + sin(wp.z * 1.7 - TIME * 0.7) + sin((wp.x + wp.z) * 0.6 + TIME * 0.5);\n\tfloat d = max(abs(wp.x), abs(wp.z));\n\tfloat near = 1.0 - smoothstep(edge, edge + 9.0, d);\n\tvec3 c = mix(deep, shallow, near * 0.85);\n\tc += vec3(0.6) * smoothstep(1.9, 2.7, w) * 0.22;\n\tfloat foam = smoothstep(edge + 1.6, edge + 1.0, d) * (0.55 + 0.45 * sin(TIME * 1.6 + wp.x * 0.7 + wp.z * 0.7));\n\tc += vec3(0.85) * foam * 0.4;\n\tALBEDO = c;\n}"
 const JOY_R := 110.0
 const MODEL_PATH := "res://assets/models/%s.gltf"
-const ROAD_YAW := 0.0
+const ROAD_YAW := PI * 0.5   # model markings run along Z by default; roads along X need 90 degrees
 
 const MODEL_NAMES: Array[String] = ["road_junction", "road_straight", "base", "streetlight",
 	"trafficlight_A", "trafficlight_B", "trafficlight_C", "watertower", "bush", "bench", "box_A", "box_B",
@@ -201,9 +201,51 @@ func _ready() -> void:
 	music.enabled = false   # silent during the brand + game intro
 	starter_shown = true
 	_request_models()
+	_build_rival_arrows()
 	ui.play_intro()
 	await get_tree().process_frame
 	await _new_round(false, true)
+
+
+var arrows: Control
+
+
+## Edge-of-screen markers that point to rival holes you cannot see right now.
+func _build_rival_arrows() -> void:
+	var cl := CanvasLayer.new()
+	cl.layer = 2
+	add_child(cl)
+	arrows = Control.new()
+	arrows.set_anchors_preset(Control.PRESET_FULL_RECT)
+	arrows.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	arrows.draw.connect(_draw_arrows)
+	cl.add_child(arrows)
+
+
+func _draw_arrows() -> void:
+	if state != "playing" and state != "countdown":
+		return
+	var vp := arrows.get_viewport_rect().size
+	var ctr := vp * 0.5
+	for h in holes:
+		if h == player or not is_instance_valid(h):
+			continue
+		var wp := h.position + Vector3(0, 0.2, 0)
+		if cam.is_position_behind(wp):
+			continue
+		var sp := cam.unproject_position(wp)
+		var m := 46.0
+		if Rect2(m, m + 70.0, vp.x - m * 2.0, vp.y - m * 2.0 - 70.0).has_point(sp):
+			continue
+		var dir := (sp - ctr).normalized()
+		var k := minf((vp.x * 0.5 - m) / maxf(absf(sp.x - ctr.x), 0.001), (vp.y * 0.5 - m) / maxf(absf(sp.y - ctr.y), 0.001))
+		var pos := ctr + (sp - ctr) * k
+		pos.y = clampf(pos.y, m + 70.0, vp.y - m)
+		var big: bool = h.r > player.r * 1.25
+		var col: Color = Color(1, 0.3, 0.3) if big else h.color
+		var side := Vector2(-dir.y, dir.x)
+		arrows.draw_circle(pos, 19.0, Color(0.03, 0.04, 0.12, 0.8))
+		arrows.draw_colored_polygon(PackedVector2Array([pos + dir * 15.0, pos - dir * 8.0 + side * 10.0, pos - dir * 8.0 - side * 10.0]), col)
 
 
 func _notification(what: int) -> void:
@@ -510,6 +552,11 @@ func _spawn_holes() -> void:
 			break
 	while spots.size() < 9:
 		spots.append(cand.pick_random())
+	var first: Vector3 = spots[0]
+	var rest: Array[Vector3] = spots.slice(1)
+	rest.sort_custom(func(a: Vector3, b: Vector3): return a.distance_to(first) < b.distance_to(first))
+	spots = [first]
+	spots.append_array(rest)
 	var lvl := profile.level
 	var start_r := 0.30 + 0.025 * float(profile.upg["size"])
 	player = _make_hole("YOU", Color.WHITE, true, spots[0], start_r)
@@ -810,7 +857,7 @@ func _item_t(model: String, pos: Vector3, yaw: float, longest: float, pts_overri
 
 
 func _put(model: String, pos: Vector3, longest: float, pts: int = 0, special: String = "") -> Item:
-	return _item_t(model, pos, rng.randf() * TAU, longest, pts, special)
+	return _item_t(model, pos, float(rng.randi() % 4) * PI * 0.5, longest, pts, special)
 
 
 func _small(pos: Vector3) -> void:
@@ -1295,7 +1342,28 @@ func _set_fade(it: Variant, v: float) -> void:
 		_gis(it, arr)
 		it.set_meta("gis", arr)
 	for g in it.get_meta("gis"):
-		(g as GeometryInstance3D).transparency = v
+		var mi := g as MeshInstance3D
+		if mi == null:
+			continue
+		if v <= 0.0:
+			if mi.material_override != null and mi.has_meta("fade_mat"):
+				mi.material_override = null
+			continue
+		if not mi.has_meta("fade_mat"):
+			var src: Material = null
+			if mi.mesh != null and mi.mesh.get_surface_count() > 0:
+				src = mi.mesh.surface_get_material(0)
+			var fm: Material = null
+			if src is BaseMaterial3D:
+				var d := (src as BaseMaterial3D).duplicate() as BaseMaterial3D
+				d.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+				d.albedo_color = Color(1, 1, 1, 1.0 - v)
+				d.cull_mode = BaseMaterial3D.CULL_DISABLED
+				fm = d
+			mi.set_meta("fade_mat", fm)
+		var fmat: Variant = mi.get_meta("fade_mat")
+		if fmat != null:
+			mi.material_override = fmat
 
 
 ## Buildings between the camera and the player turn see-through so the hole is never hidden.
@@ -1314,12 +1382,13 @@ func _update_occlusion(delta: float) -> void:
 	for cx in range(c0.x, c1.x + 1):
 		for cz in range(c0.y, c1.y + 1):
 			for it: Item in grid.get(Vector2i(cx, cz), []):
-				if not it.big:
+				if it.mover != 0 or it.height < 0.8 or it.size < 1.0 or it.kind.begins_with("@"):
 					continue
 				var dz := it.position.z - pp.z
 				var dx := absf(it.position.x - pp.x)
-				if dz > -it.size * 0.45 and dz < it.height * 0.55 + it.size * 0.5 + player.r + 0.6 and dx < it.size * 0.5 + player.r + 0.8:
-					_set_fade(it, 0.72)
+				var near := Vector2(dx, absf(dz)).length() < it.size * 0.75 + player.r + 1.2
+				if near or (dz > -it.size * 0.45 and dz < it.height * 0.55 + it.size * 0.5 + player.r + 0.6 and dx < it.size * 0.5 + player.r + 0.8):
+					_set_fade(it, 0.78)
 					faded.append(it)
 
 
@@ -1599,7 +1668,7 @@ func _eat_items(delta: float) -> void:
 				while i >= 0:
 					var it: Item = cell_arr[i]
 					i -= 1
-					if it.size * 0.4 > r:
+					if it.size * (0.32 if it.is_vehicle else 0.4) > r:
 						continue
 					var dx := it.position.x - hp.x
 					var dz := it.position.z - hp.z
@@ -1841,7 +1910,7 @@ func _pick_target(h: Hole) -> Item:
 	var best: Item = null
 	var best_score := -1.0
 	for it in items:
-		if it.size * 0.4 > h.r:
+		if it.size * (0.32 if it.is_vehicle else 0.4) > h.r:
 			continue
 		if absf(it.position.x) > zone_half or absf(it.position.z) > zone_half:
 			continue
@@ -1881,7 +1950,7 @@ func _replenish(delta: float) -> void:
 		return
 	for k in 4:
 		var p: Vector3 = block_points.pick_random()
-		_small(p + Vector3(rng.randf_range(-1.8, 1.8), 0.1, rng.randf_range(-1.8, 1.8)))
+		_small(p + Vector3(rng.randf_range(-0.9, 0.9), 0.1, rng.randf_range(-0.9, 0.9)))
 
 
 # ---------- power-ups ----------
@@ -2008,7 +2077,7 @@ func _update_camera(delta: float) -> void:
 	tgt.x = clampf(tgt.x, -lim, lim)
 	tgt.z = clampf(tgt.z, -lim, lim)
 	cam_focus = cam_focus.lerp(tgt, 1.0 - exp(-6.0 * delta))
-	var want := 3.3 + player.r * 5.4
+	var want := 4.6 + player.r * 5.4
 	if state == "menu" or state == "result":
 		want = 4.6 + player.r * 6.5
 		want *= 1.25
@@ -2029,6 +2098,8 @@ func _update_hud(delta: float) -> void:
 	var mm_dots: Array = []
 	for h in holes:
 		mm_dots.append([h.position.x, h.position.z, h.r, h.color, h.is_player])
+	if arrows != null:
+		arrows.queue_redraw()
 	ui.update_minimap(mm_dots, zone_half if mode == "royale" else HALF)
 	var powers := ""
 	if player.effects["speed"] > 0.0:

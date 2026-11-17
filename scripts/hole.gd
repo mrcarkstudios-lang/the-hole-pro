@@ -97,7 +97,8 @@ func set_skin(c: Color, p_rainbow: bool) -> void:
 
 
 func add_mass(p: float, growth_mult: float) -> void:
-	target_r = minf(sqrt(target_r * target_r + p * 0.0013 * growth_mult), max_r)
+	# every swallow gives a visible bump (floor), big things give much more
+	target_r = minf(sqrt(target_r * target_r + maxf(p, 4.0) * 0.0026 * growth_mult), max_r)
 
 
 func speed() -> float:
